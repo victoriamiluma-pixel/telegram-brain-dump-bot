@@ -3,15 +3,18 @@ const path = require("path");
 const OpenAI = require("openai");
 const { toFile } = require("openai");
 
-// Note: we tried overriding this client to use Node's native fetch instead
-// of the SDK's bundled HTTP client, but that triggered a different bug
-// ("Response body object should not be disturbed or locked") due to
-// stricter undici semantics conflicting with how the SDK reads responses.
-// Reverted to the SDK's default HTTP client.
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Groq's API is compatible with OpenAI's client libraries, so we just point
+// the OpenAI SDK at Groq's endpoint instead. Groq's free tier needs no
+// credit card and covers far more usage than a couple of people brain-
+// dumping voice memos will ever hit (2,000 transcriptions/day, ~8 hours of
+// audio/day, plus a generous daily allowance for the task-extraction calls).
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
+});
 
 /**
- * Transcribe an audio file on disk using OpenAI's Whisper model.
+ * Transcribe an audio file on disk using Groq's hosted Whisper model.
  * @param {string} filePath
  * @returns {Promise<string>} transcript text
  */
@@ -33,9 +36,9 @@ async function transcribeAudio(filePath, attempt = 1) {
     // intermittent ECONNRESET errors on some hosts.
     const buffer = fs.readFileSync(filePath);
     const file = await toFile(buffer, path.basename(filePath));
-    const transcription = await openai.audio.transcriptions.create({
+    const transcription = await groq.audio.transcriptions.create({
       file,
-      model: "whisper-1",
+      model: "whisper-large-v3-turbo",
     });
     return transcription.text;
   } catch (err) {
@@ -56,8 +59,8 @@ async function transcribeAudio(filePath, attempt = 1) {
 async function extractTasks(transcript) {
   const today = new Date().toISOString().slice(0, 10);
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.3-70b-versatile",
     temperature: 0,
     response_format: { type: "json_object" },
     messages: [

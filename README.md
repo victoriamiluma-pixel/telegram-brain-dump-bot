@@ -26,7 +26,7 @@ create anything in Notion — just point the bot at it (Part 1 below).
 ## How it works (in plain terms)
 
 1. Your boss sends a Telegram voice memo to your bot.
-2. The bot downloads the audio and transcribes it with OpenAI's Whisper model.
+2. The bot downloads the audio and transcribes it with Groq's hosted Whisper model.
 3. An AI model reads the transcript and pulls out a clean list of tasks.
 4. Each task becomes a new page in the "Brain Dump Tasks" Notion database, with a note on whether it came from you or your boss.
 5. The bot replies on Telegram listing the tasks it just created.
@@ -49,11 +49,15 @@ directly via API.
 
 ---
 
-## Part 2 — Get an OpenAI API key
+## Part 2 — Get a Groq API key
 
-1. Go to **https://platform.openai.com/api-keys** and sign in (or create an account).
-2. Click **Create new secret key**, name it, and copy it — this is your `OPENAI_API_KEY`. You can't view it again after closing the dialog.
-3. Add a small amount of credit under **Settings → Billing** (transcription + task extraction costs a few cents per voice memo).
+Groq hosts Whisper (for transcription) and Llama (for pulling out tasks) and
+gives free access to both — no credit card needed, and its free-tier limits
+(2,000 transcriptions/day, about 8 hours of audio/day) are far more than a
+couple of people brain-dumping voice memos will ever use.
+
+1. Go to **https://console.groq.com/keys** and sign in (or create a free account).
+2. Click **Create API Key**, name it, and copy it — this is your `GROQ_API_KEY`. You can't view it again after closing the dialog.
 
 ---
 
@@ -104,7 +108,7 @@ and Render redeploys automatically.
 4. Render should auto-detect it as a Node app. Leave the defaults (**Build Command**: `npm install`, **Start Command**: `npm start`), and choose the **Free** instance type.
 5. Before clicking create, scroll to **Environment Variables** and add these (real values from Parts 1–3; leave `TELEGRAM_ALLOWED_USER_IDS` out for now):
    - `TELEGRAM_BOT_TOKEN`
-   - `OPENAI_API_KEY`
+   - `GROQ_API_KEY`
    - `NOTION_API_KEY`
    - `NOTION_DATABASE_ID` = `53a2f215cbb04a7e9a2a9a9e4ab255b3`
 6. Click **Create Web Service**. Render will build and deploy — watch the **Logs** tab; once you see `Telegram webhook registered at https://...`, it's live.
@@ -137,7 +141,7 @@ If something doesn't work, check the **Logs** tab on your service in the Render 
 
 ## Notes, limits, and things to keep in mind
 
-- **Cost**: Telegram's Bot API, OpenAI's per-request fees (a few cents per voice memo), and Render's free tier — no credit card required for this setup.
+- **Cost**: Telegram's Bot API, Groq's free tier, and Render's free tier — no credit card required anywhere in this setup.
 - **Sleep after inactivity**: Render's free tier spins the service down after about 15 minutes with no traffic. The next message wakes it back up automatically, but that first reply can take up to a minute. This is a fine tradeoff for occasional personal/small-team use; it just means it isn't instant if nobody's used it in a while.
 - **No sandbox expiry**: unlike WhatsApp's free tier, this Telegram bot never needs re-authorization once Part 6 is done.
 - **Security**: the bot ignores every Telegram account except the ones listed in `TELEGRAM_ALLOWED_USER_IDS`, and the webhook URL itself is only guessable if you know the bot token (which only you have).
@@ -151,6 +155,6 @@ If something doesn't work, check the **Logs** tab on your service in the Render 
 ## File overview
 
 - `server.js` — connects to Telegram, receives messages, orchestrates the flow, replies.
-- `ai.js` — calls OpenAI to transcribe audio and extract structured tasks from a transcript.
+- `ai.js` — calls Groq to transcribe audio and extract structured tasks from a transcript.
 - `notion.js` — creates a page (task) in the Brain Dump Tasks Notion database.
-- `.env.example` — template for all required configuration; copy to `.env` for local testing (Railway uses `railway variables` instead of a `.env` file in production).
+- `.env.example` — template for all required configuration; copy to `.env` for local testing (Render's dashboard is where real values live in production).
