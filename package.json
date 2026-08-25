@@ -1,0 +1,21 @@
+{
+  "name": "telegram-brain-dump-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that turns voice-memo brain dumps into Notion tasks",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.68.0"
+  }
+}

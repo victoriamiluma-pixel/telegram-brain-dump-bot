@@ -1,0 +1,110 @@
+const fs = require("fs");
+const path = require("path");
+const OpenAI = require("openai");
+const { toFile } = require("openai");
+
+// Note: we tried overriding this client to use Node's native fetch instead
+// of the SDK's bundled HTTP client, but that triggered a different bug
+// ("Response body object should not be disturbed or locked") due to
+// stricter undici semantics conflicting with how the SDK reads responses.
+// Reverted to the SDK's default HTTP client.
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/**
+ * Transcribe an audio file on disk using OpenAI's Whisper model.
+ * @param {string} filePath
+ * @returns {Promise<string>} transcript text
+ */
+function isTransientNetworkError(err) {
+  const code = err && (err.code || (err.cause && err.cause.code));
+  return (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EAI_AGAIN" ||
+    (err && err.name === "APIConnectionError")
+  );
+}
+
+async function transcribeAudio(filePath, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
+  try {
+    // Read the whole file into memory and send it as a single buffered upload
+    // (rather than a live stream) — streaming uploads have shown to trigger
+    // intermittent ECONNRESET errors on some hosts.
+    const buffer = fs.readFileSync(filePath);
+    const file = await toFile(buffer, path.basename(filePath));
+    const transcription = await openai.audio.transcriptions.create({
+      file,
+      model: "whisper-1",
+    });
+    return transcription.text;
+  } catch (err) {
+    if (isTransientNetworkError(err) && attempt < MAX_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      return transcribeAudio(filePath, attempt + 1);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Given a raw transcript (a rambling brain dump), extract a list of
+ * distinct, actionable tasks as structured JSON.
+ * @param {string} transcript
+ * @returns {Promise<Array<{title: string, description: string, due_date: string|null}>>}
+ */
+async function extractTasks(transcript) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You turn rambling voice-memo brain dumps from a busy executive into a clean list of " +
+          "actionable tasks for a team's task tracker. Rules:\n" +
+          "- Extract every distinct action item, decision-to-follow-up-on, or thing to delegate.\n" +
+          "- Ignore filler, greetings, and pure venting with no actionable content.\n" +
+          "- Merge sentences that describe the same single task; don't split one task into many.\n" +
+          "- Write each title as a short, clear imperative phrase (e.g. 'Follow up with vendor about invoice').\n" +
+          "- Write the title and description in the SAME language as the transcript below. Do not translate " +
+          "(e.g. a Spanish transcript should produce Spanish task titles and descriptions).\n" +
+          "- Put extra context, names, numbers, or nuance in 'description'.\n" +
+          "- If a relative date is mentioned (e.g. 'by Friday', 'next week'), resolve it to an absolute " +
+          `date in YYYY-MM-DD format, using today's date (${today}) as the reference point. ` +
+          "Otherwise set due_date to null.\n" +
+          "- If there are no actionable tasks at all, return an empty tasks array.\n" +
+          'Respond ONLY with JSON of the shape: {"tasks": [{"title": "...", "description": "...", "due_date": "YYYY-MM-DD or null"}]}',
+      },
+      {
+        role: "user",
+        content: transcript,
+      },
+    ],
+  });
+
+  const raw = completion.choices[0].message.content;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Failed to parse task extraction JSON: ${err.message}\nRaw: ${raw}`);
+  }
+
+  if (!Array.isArray(parsed.tasks)) {
+    return [];
+  }
+
+  return parsed.tasks
+    .filter((t) => t && t.title && String(t.title).trim().length > 0)
+    .map((t) => ({
+      title: String(t.title).trim(),
+      description: t.description ? String(t.description).trim() : "",
+      due_date: t.due_date && /^\d{4}-\d{2}-\d{2}$/.test(t.due_date) ? t.due_date : null,
+    }));
+}
+
+module.exports = { transcribeAudio, extractTasks };
