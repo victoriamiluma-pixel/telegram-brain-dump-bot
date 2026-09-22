@@ -14,8 +14,8 @@ const express = require("express");
 const axios = require("axios");
 const TelegramBot = require("node-telegram-bot-api");
 
-const { transcribeAudio, extractTasks } = require("./ai");
-const { createTask } = require("./notion");
+const { transcribeAudio, extractTasks, todayLocal } = require("./ai");
+const { createTask, getDailySummary } = require("./notion");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 // Comma-separated list of Telegram user IDs allowed to use the bot (e.g. you + your boss).
@@ -26,6 +26,15 @@ const ALLOWED_USER_IDS = new Set(
     .filter(Boolean)
 );
 const PORT = process.env.PORT || 3000;
+
+// Resumen diario: a quién se envía (IDs de chat separados por coma; si está
+// vacío, se envía a todos los TELEGRAM_ALLOWED_USER_IDS) y la clave que debe
+// traer el cron para dispararlo.
+const SUMMARY_CHAT_IDS = (process.env.TELEGRAM_SUMMARY_CHAT_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+const CRON_SECRET = process.env.CRON_SECRET || "";
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN in environment. Exiting.");
@@ -48,13 +57,60 @@ function extFromMime(mime) {
   return MIME_TO_EXT[mime.split(";")[0].trim().toLowerCase()] || "ogg";
 }
 
+function formatDate(ymd) {
+  if (!ymd) return "";
+  const [y, m, d] = ymd.split("-");
+  return `${d}/${m}`;
+}
+
 function formatTaskList(tasks) {
   return tasks
     .map((t, i) => {
-      const due = t.due_date ? ` (due ${t.due_date})` : "";
-      return `${i + 1}. ${t.title}${due}`;
+      const extras = [];
+      if (t.priority) extras.push(t.priority);
+      if (t.planned_date) extras.push(`hacer el ${formatDate(t.planned_date)}`);
+      if (t.due_date) extras.push(`vence ${formatDate(t.due_date)}`);
+      if (t.delegated_to) extras.push(`delegar a ${t.delegated_to}`);
+      const info = extras.length ? ` (${extras.join(", ")})` : "";
+      const review = t.needs_review ? `\n   ⚠️ A confirmar: ${t.review_note || "revisar"}` : "";
+      return `${i + 1}. ${t.title}${info}${review}`;
     })
     .join("\n");
+}
+
+function formatSummaryLine(t, today) {
+  const bits = [];
+  if (t.priority) bits.push(t.priority);
+  if (t.due && t.due < today) bits.push(`VENCIDA ${formatDate(t.due)}`);
+  else if (t.due) bits.push(`vence ${formatDate(t.due)}`);
+  if (t.planned && t.planned < today) bits.push(`atrasada desde ${formatDate(t.planned)}`);
+  if (t.delegatedTo) bits.push(t.delegatedTo);
+  if (t.needsReview) bits.push("⚠️ a confirmar");
+  return `• ${t.title}${bits.length ? ` (${bits.join(", ")})` : ""}`;
+}
+
+async function buildDailySummaryText() {
+  const { today, waiting, inboxCount } = await getDailySummary();
+  const todayYmd = todayLocal();
+  const parts = [`📅 Agenda de hoy ${formatDate(todayYmd)}`];
+
+  parts.push(
+    today.length
+      ? today.map((t) => formatSummaryLine(t, todayYmd)).join("\n")
+      : "No hay tareas planificadas para hoy."
+  );
+
+  if (waiting.length) {
+    parts.push(`⏳ Esperando respuesta (${waiting.length})\n` +
+      waiting.map((t) => formatSummaryLine(t, todayYmd)).join("\n"));
+  }
+
+  if (inboxCount) {
+    parts.push(`📥 ${inboxCount} tarea${inboxCount === 1 ? "" : "s"} sin fecha en la Bandeja de entrada.`);
+  }
+
+  // Telegram corta los mensajes en 4096 caracteres.
+  return parts.join("\n\n").slice(0, 4000);
 }
 
 async function processBrainDump({ transcript, sourceLabel }) {
@@ -62,8 +118,8 @@ async function processBrainDump({ transcript, sourceLabel }) {
 
   if (tasks.length === 0) {
     return (
-      "I read that but didn't find any clear action items in it. " +
-      "Here's the transcript in case I missed something:\n\n" +
+      "Lo leí pero no encontré tareas concretas. " +
+      "Te dejo la transcripción por si se me escapó algo:\n\n" +
       transcript.slice(0, 1500)
     );
   }
@@ -72,7 +128,7 @@ async function processBrainDump({ transcript, sourceLabel }) {
     await createTask(task, sourceLabel);
   }
 
-  return `✅ Created ${tasks.length} task${tasks.length === 1 ? "" : "s"} in Notion:\n\n${formatTaskList(tasks)}`;
+  return `✅ Cargué ${tasks.length} tarea${tasks.length === 1 ? "" : "s"} en Notion:\n\n${formatTaskList(tasks)}`;
 }
 
 // No { polling: true } here — Render's free tier is a request-driven web
@@ -114,8 +170,12 @@ bot.on("message", async (msg) => {
       if (msg.text.startsWith("/start") || msg.text.startsWith("/help")) {
         await bot.sendMessage(
           msg.chat.id,
-          "Send me a voice memo (or just type a brain dump) and I'll turn it into tasks in Notion."
+          "Mandame un audio (o escribí lo que tengas en la cabeza) y lo convierto en tareas de Notion.\n\n" +
+            "/hoy: ver la agenda del día, lo vencido y lo que espera respuesta."
         );
+      } else if (msg.text.startsWith("/hoy")) {
+        await bot.sendChatAction(msg.chat.id, "typing");
+        await bot.sendMessage(msg.chat.id, await buildDailySummaryText());
       }
       return;
     }
@@ -159,12 +219,12 @@ bot.on("message", async (msg) => {
 
     await bot.sendMessage(
       msg.chat.id,
-      "Send me a voice memo (or just type a brain dump) and I'll turn it into tasks in Notion."
+      "Mandame un audio (o escribí lo que tengas en la cabeza) y lo convierto en tareas de Notion."
     );
   } catch (err) {
     console.error("Error handling Telegram message:", err);
     try {
-      await bot.sendMessage(msg.chat.id, "Something went wrong while processing that — sorry! Please try again in a bit.");
+      await bot.sendMessage(msg.chat.id, "Algo falló al procesar el mensaje. Probá de nuevo en un rato.");
     } catch (_) {
       /* ignore secondary failure */
     }
@@ -174,6 +234,22 @@ bot.on("message", async (msg) => {
 const app = express();
 app.use(express.json());
 app.get("/health", (req, res) => res.status(200).send("ok"));
+
+// Resumen diario. Lo dispara un cron externo (cron-job.org o un Cron Job de
+// Render) con GET /daily-summary?key=<CRON_SECRET>. Responde enseguida y
+// envía el mensaje en segundo plano, así el cron no espera a Notion/Telegram.
+app.get("/daily-summary", (req, res) => {
+  if (!CRON_SECRET || req.query.key !== CRON_SECRET) {
+    return res.sendStatus(403);
+  }
+  res.status(202).send("ok");
+
+  const recipients = SUMMARY_CHAT_IDS.length ? SUMMARY_CHAT_IDS : [...ALLOWED_USER_IDS];
+  buildDailySummaryText()
+    .then((text) => Promise.all(recipients.map((id) => bot.sendMessage(id, text))))
+    .then(() => console.log(`Daily summary sent to ${recipients.length} chat(s)`))
+    .catch((err) => console.error("Failed to send daily summary:", err));
+});
 
 // The bot token doubles as a secret path segment, so only Telegram (which
 // knows the token) can hit this route with real updates.
